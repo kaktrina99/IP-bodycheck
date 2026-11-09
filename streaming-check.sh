@@ -15,6 +15,7 @@
 #   2. 每項檢查都印出「測試網址 + HTTP 狀態碼」，可以手動驗證
 #   3. 只判斷「服務打不打得開」，不猜內部編號
 #   4. Netflix 的 Originals Only 邏輯是修正過的（原版邏輯寫反了）
+#   5. 檢測分兩區：串流媒體、AI 服務，結果用 ✅ 可用、❌ 不可用、❓ 部分/不確定標示
 #
 # 用法：
 #   bash streaming-check.sh
@@ -56,6 +57,10 @@ fetch_url() {
     curl "$1" -s -L -m 20 --connect-timeout 10 -A "$UA" -o "$3" -w "%{http_code} %{url_effective}" "$2" 2>/dev/null || echo "000 -"
 }
 
+# ============================================================================
+# 串流媒體
+# ============================================================================
+
 # ---------- 1. Netflix ----------
 # 方法：抓兩部片的頁面
 #   81280792 = Netflix 自製劇（只要 Netflix 能用就一定打得開）
@@ -74,19 +79,19 @@ check_netflix() {
     c2=$(fetch "$f" "$u2" "$WORK/nf2.html")
     grep -qi "Oh no!\|unblocker or proxy" "$WORK/nf1.html" 2>/dev/null && e1=1
     grep -qi "Oh no!\|unblocker or proxy" "$WORK/nf2.html" 2>/dev/null && e2=1
-    local res
+    local sym res
     if [ "$c1" = "000" ] || [ "$c2" = "000" ]; then
-        res="連線失敗"
+        sym="❌"; res="連線失敗"
     elif [ "$e1" -eq 0 ] && [ "$e2" -eq 1 ]; then
-        res="僅自製劇 (Originals Only)"
+        sym="❓"; res="僅自製劇 (Originals Only)"
     elif [ "$e1" -eq 0 ] && [ "$e2" -eq 0 ]; then
-        res="完整解鎖 (Full)"
+        sym="✅"; res="完整解鎖 (Full)"
     elif [ "$e1" -eq 1 ] && [ "$e2" -eq 1 ]; then
-        res="被封鎖 (兩部片都打不開)"
+        sym="❌"; res="被封鎖 (兩部片都打不開)"
     else
-        res="結果異常，請手動開網址確認"
+        sym="❓"; res="結果異常，請手動開網址確認"
     fi
-    echo "[$tag] Netflix: $res"
+    echo "[$tag] $sym Netflix: $res"
     echo "      自製劇: $u1 HTTP $c1 | 授權劇: $u2 HTTP $c2"
 }
 
@@ -100,19 +105,19 @@ check_disney() {
     local out code final
     out=$(fetch_url "$f" "$url" "$WORK/dp.html")
     code="${out%% *}"; final="${out#* }"
-    local res
+    local sym res
     if [ "$code" = "000" ]; then
-        res="連線失敗"
+        sym="❌"; res="連線失敗"
     elif grep -qi "not available in your region\|forbidden-location\|is not currently available in your country" "$WORK/dp.html" 2>/dev/null; then
-        res="被封鎖 (地區不支援)"
+        sym="❌"; res="被封鎖 (地區不支援)"
     elif [ "$code" = "403" ]; then
-        res="被封鎖 (HTTP 403)"
+        sym="❌"; res="被封鎖 (HTTP 403)"
     elif [ "$code" = "200" ]; then
-        res="可用 (首頁可打開)"
+        sym="✅"; res="可用 (首頁可打開)"
     else
-        res="不確定 (HTTP $code)"
+        sym="❓"; res="不確定 (HTTP $code)"
     fi
-    echo "[$tag] Disney+: $res"
+    echo "[$tag] $sym Disney+: $res"
     echo "      測試: $url HTTP $code 最終網址: $final"
 }
 
@@ -125,25 +130,77 @@ check_ytpremium() {
     local code region
     code=$(fetch "$f" "$url" "$WORK/yt.html")
     region=$(grep -o '"INNERTUBE_CONTEXT_GL":"[A-Z]*"' "$WORK/yt.html" 2>/dev/null | head -1 | cut -d'"' -f4)
-    local res
+    local sym res
     if [ "$code" = "000" ]; then
-        res="連線失敗"
+        sym="❌"; res="連線失敗"
     elif grep -qi "Premium is not available in your country" "$WORK/yt.html" 2>/dev/null; then
-        res="不提供 (該地區無 Premium)"
+        sym="❌"; res="不提供 (該地區無 Premium)"
     elif [ -n "$region" ]; then
-        res="可用 (地區: $region)"
+        sym="✅"; res="可用 (地區: $region)"
     elif [ "$code" = "200" ]; then
-        res="可用 (地區未知)"
+        sym="❓"; res="可用 (地區未知)"
     else
-        res="不確定 (HTTP $code)"
+        sym="❓"; res="不確定 (HTTP $code)"
     fi
-    echo "[$tag] YouTube Premium: $res"
+    echo "[$tag] $sym YouTube Premium: $res"
     echo "      測試: $url HTTP $code"
 }
 
-# ---------- 4. ChatGPT ----------
+# ---------- 4. HBO Max ----------
+# 方法：抓 https://www.max.com/，找頁面裡的 countryCode=XX。
+check_hbomax() {
+    local f="$1" tag="$2"
+    local url="https://www.max.com/"
+    local code region
+    code=$(fetch "$f" "$url" "$WORK/hbo.html")
+    region=$(grep -o 'countryCode=[A-Z][A-Z]' "$WORK/hbo.html" 2>/dev/null | head -1 | cut -d= -f2)
+    local sym res
+    if [ "$code" = "000" ]; then
+        sym="❌"; res="連線失敗"
+    elif [ -n "$region" ]; then
+        sym="✅"; res="可用 (地區: $region)"
+    elif [ "$code" = "200" ]; then
+        sym="❓"; res="首頁可打開 (地區未知)"
+    else
+        sym="❓"; res="不確定 (HTTP $code)"
+    fi
+    echo "[$tag] $sym HBO Max: $res"
+    echo "      測試: $url HTTP $code"
+}
+
+# ---------- 5. Paramount+ ----------
+# 方法：抓首頁，看最後跳轉到的網址裡的地區段；跳到 /intl = 不支援。
+check_paramount() {
+    local f="$1" tag="$2"
+    local url="https://www.paramountplus.com/"
+    local out code final region
+    out=$(fetch_url "$f" "$url" "$WORK/pp.html")
+    code="${out%% *}"; final="${out#* }"
+    region=$(echo "$final" | cut -d/ -f4 | tr 'a-z' 'A-Z')
+    local sym res
+    if [ "$code" = "000" ]; then
+        sym="❌"; res="連線失敗"
+    elif [ "$region" = "INTL" ]; then
+        sym="❌"; res="不支援 (跳到國際版)"
+    elif [ "$code" = "200" ]; then
+        [ -z "$region" ] && region="US"
+        sym="✅"; res="可用 (地區: $region)"
+    else
+        sym="❓"; res="不確定 (HTTP $code)"
+    fi
+    echo "[$tag] $sym Paramount+: $res"
+    echo "      測試: $url HTTP $code 最終網址: $final"
+}
+
+# ============================================================================
+# AI 服務
+# ============================================================================
+
+# ---------- 6. ChatGPT ----------
 # 方法：查 OpenAI 公開的合規端點有沒有 unsupported_country，
 # 再加 chatgpt.com 首頁能不能開。兩個都沒擋 = 可用。
+# 注意：只查 "unsupported_country" 和 "not available in your country"
+# 這兩個精確短語，不查籠統的 "blocked"，避免誤判。
 check_chatgpt() {
     local f="$1" tag="$2"
     local code1 code2 out final
@@ -152,44 +209,51 @@ check_chatgpt() {
     code2="${out%% *}"; final="${out#* }"
     local blocked=0
     grep -qi "unsupported_country" "$WORK/gpt1.json" 2>/dev/null && blocked=1
-    grep -qi "not available in your country\|blocked" "$WORK/gpt2.html" 2>/dev/null && blocked=1
-    local res
+    grep -qi "not available in your country" "$WORK/gpt2.html" 2>/dev/null && blocked=1
+    local sym res
     if [ "$code1" = "000" ] && [ "$code2" = "000" ]; then
-        res="連線失敗"
+        sym="❌"; res="連線失敗"
     elif [ "$blocked" -eq 1 ]; then
-        res="被封鎖"
+        sym="❌"; res="被封鎖"
     elif [ "$code2" = "200" ]; then
-        res="可用"
+        sym="✅"; res="可用"
     else
-        res="不確定 (HTTP $code2)"
+        sym="❓"; res="不確定 (HTTP $code2)"
     fi
-    echo "[$tag] ChatGPT: $res"
+    echo "[$tag] $sym ChatGPT: $res"
     echo "      測試: api.openai.com/compliance/cookie_requirements HTTP $code1 | chatgpt.com HTTP $code2"
 }
 
-# ---------- 5. Claude ----------
-# 方法：抓 https://claude.ai/，看最後停在哪個網址。
-# 停在 claude.ai = 可用；被轉到 app-unavailable-in-region = 地區不支援。
+# ---------- 7. Claude ----------
+# 方法：抓 https://claude.ai/，看 HTTP 狀態碼和最後停在哪個網址。
+#   HTTP 200 + 停在 claude.ai = 可用
+#   被轉到 app-unavailable-in-region = 地區不支援
+#   HTTP 403 但網址仍是 claude.ai = 結果不一致（使用者天天用 Claude，
+#   實際使用可能與本次檢查不同，請以實際使用為準）
 check_claude() {
     local f="$1" tag="$2"
     local out code final
     out=$(fetch_url "$f" "https://claude.ai/" "$WORK/claude.html")
     code="${out%% *}"; final="${out#* }"
-    local res
+    local sym res
     if [ "$code" = "000" ]; then
-        res="連線失敗"
+        sym="❌"; res="連線失敗"
     elif [[ "$final" == *"app-unavailable-in-region"* ]]; then
-        res="被封鎖 (地區不支援)"
-    elif [[ "$final" == "https://claude.ai"* ]]; then
-        res="可用"
+        sym="❌"; res="被封鎖 (地區不支援)"
+    elif [ "$code" = "403" ] && [[ "$final" == "https://claude.ai"* ]]; then
+        sym="❓"; res="結果不一致 (HTTP 403 但網址仍是 claude.ai，實際使用可能正常，請以實際使用為準)"
+    elif [ "$code" = "403" ]; then
+        sym="❌"; res="被封鎖 (HTTP 403)"
+    elif [ "$code" = "200" ] && [[ "$final" == "https://claude.ai"* ]]; then
+        sym="✅"; res="可用"
     else
-        res="不確定 (最終網址: $final)"
+        sym="❓"; res="不確定 (HTTP $code，最終網址: $final)"
     fi
-    echo "[$tag] Claude: $res"
+    echo "[$tag] $sym Claude: $res"
     echo "      測試: https://claude.ai/ HTTP $code 最終網址: $final"
 }
 
-# ---------- 6. Gemini（重點修正） ----------
+# ---------- 8. Gemini（重點修正） ----------
 # 原版錯在：抓 gemini.google.com 的原始碼，去找一串寫死的數字
 # '45631641,null,true'（Google 前端 JS 裡的內部編號），
 # Google 一改版數字就變，數字一變就報 No，明明服務正常。
@@ -200,66 +264,20 @@ check_gemini() {
     local url="https://gemini.google.com/"
     local code
     code=$(fetch "$f" "$url" "$WORK/gem.html")
-    local res
+    local sym res
     if [ "$code" = "000" ]; then
-        res="連線失敗"
+        sym="❌"; res="連線失敗"
     elif grep -qi "not available in your country\|isn't available in your country\|unavailable in your region" "$WORK/gem.html" 2>/dev/null; then
-        res="被封鎖 (地區不支援)"
+        sym="❌"; res="被封鎖 (地區不支援)"
     elif [ "$code" = "200" ] && grep -qi "Gemini" "$WORK/gem.html" 2>/dev/null; then
-        res="可用"
+        sym="✅"; res="可用"
     elif [ "$code" = "200" ]; then
-        res="可用 (首頁 HTTP 200)"
+        sym="✅"; res="可用 (首頁 HTTP 200)"
     else
-        res="不確定 (HTTP $code)"
+        sym="❓"; res="不確定 (HTTP $code)"
     fi
-    echo "[$tag] Gemini: $res"
+    echo "[$tag] $sym Gemini: $res"
     echo "      測試: $url HTTP $code"
-}
-
-# ---------- 7. HBO Max ----------
-# 方法：抓 https://www.max.com/，找頁面裡的 countryCode=XX。
-check_hbomax() {
-    local f="$1" tag="$2"
-    local url="https://www.max.com/"
-    local code region
-    code=$(fetch "$f" "$url" "$WORK/hbo.html")
-    region=$(grep -o 'countryCode=[A-Z][A-Z]' "$WORK/hbo.html" 2>/dev/null | head -1 | cut -d= -f2)
-    local res
-    if [ "$code" = "000" ]; then
-        res="連線失敗"
-    elif [ -n "$region" ]; then
-        res="可用 (地區: $region)"
-    elif [ "$code" = "200" ]; then
-        res="首頁可打開 (地區未知)"
-    else
-        res="不確定 (HTTP $code)"
-    fi
-    echo "[$tag] HBO Max: $res"
-    echo "      測試: $url HTTP $code"
-}
-
-# ---------- 8. Paramount+ ----------
-# 方法：抓首頁，看最後跳轉到的網址裡的地區段；跳到 /intl = 不支援。
-check_paramount() {
-    local f="$1" tag="$2"
-    local url="https://www.paramountplus.com/"
-    local out code final region
-    out=$(fetch_url "$f" "$url" "$WORK/pp.html")
-    code="${out%% *}"; final="${out#* }"
-    region=$(echo "$final" | cut -d/ -f4 | tr 'a-z' 'A-Z')
-    local res
-    if [ "$code" = "000" ]; then
-        res="連線失敗"
-    elif [ "$region" = "INTL" ]; then
-        res="不支援 (跳到國際版)"
-    elif [ "$code" = "200" ]; then
-        [ -z "$region" ] && region="US"
-        res="可用 (地區: $region)"
-    else
-        res="不確定 (HTTP $code)"
-    fi
-    echo "[$tag] Paramount+: $res"
-    echo "      測試: $url HTTP $code 最終網址: $final"
 }
 
 # ---------- 執行 ----------
@@ -271,17 +289,21 @@ for stack in $STACKS; do
         echo "========== IPv6 檢測 =========="
         FLAG="-6"; TAG="IPv6"
     fi
+    echo "---------- 串流媒體 ----------"
     check_netflix   "$FLAG" "$TAG"
     check_disney    "$FLAG" "$TAG"
     check_ytpremium "$FLAG" "$TAG"
+    check_hbomax    "$FLAG" "$TAG"
+    check_paramount "$FLAG" "$TAG"
+    echo ""
+    echo "---------- AI 服務 ----------"
     check_chatgpt   "$FLAG" "$TAG"
     check_claude    "$FLAG" "$TAG"
     check_gemini    "$FLAG" "$TAG"
-    check_hbomax    "$FLAG" "$TAG"
-    check_paramount "$FLAG" "$TAG"
     echo ""
 done
 
 echo "========== 檢測完成 =========="
-echo "說明：每項都印了測試網址和 HTTP 狀態碼，"
+echo "符號說明：✅ 可用　❌ 不可用　❓ 部分通過 / 不確定"
+echo "每項都印了測試網址和 HTTP 狀態碼，"
 echo "懷疑哪項不準，可以直接用瀏覽器或 curl 開那個網址對照。"
